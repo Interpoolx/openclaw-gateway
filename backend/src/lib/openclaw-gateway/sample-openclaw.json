@@ -1,0 +1,62 @@
+{
+  "wizard": {
+    "lastRunAt": "2026-02-16T15:21:46.404Z",
+    "lastRunVersion": "2026.2.14",
+    "lastRunCommand": "doctor",
+    "lastRunMode": "local"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto"
+  },
+  "gateway": {
+    "auth": {
+      "mode": "token",
+      "token": "cb0100bfff3184a904a11a905f46c27f47095537016ce46"
+    },
+    "controlUi": {
+      "allowedOrigins": [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://100.72.62.25:5173",
+        "http://localhost:8787",
+        "http://127.0.0.1:8787",
+        "http://100.72.62.25:8787",
+        "http://100.72.62.25",
+        "https://clawpute.com",
+        "https://www.clawpute.com"
+      ]
+    },
+    "mode": "local",
+    "port": 18789,
+    "bind": "loopback",
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "http": {
+      "endpoints": {
+        "responses": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.2.14",
+    "lastTouchedAt": "2026-02-16T16:19:15.6316984Z"
+  },
+  "tools": {
+    "allow": [
+      "status",
+      "agents.list",
+      "agents_list",
+      "channels.list",
+      "channels_status",
+      "channels_list",
+      "config.get",
+      "config_get",
+      "metadata"
+    ]
+  }
+}
