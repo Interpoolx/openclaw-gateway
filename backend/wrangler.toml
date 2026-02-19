@@ -1,0 +1,63 @@
+name = "openclaw-admin-backend"
+main = "src/index.ts"
+compatibility_date = "2024-11-18"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# D1 Database configuration
+# 
+# QUICK START:
+# 1. Create D1 database:
+#    npx wrangler d1 create openclaw_admin
+#
+# 2. Copy the database_id from the output and update database_id below:
+#    database_id = "YOUR_DATABASE_ID_HERE"
+#
+# 3. Push schema to D1:
+#    npx wrangler d1 execute openclaw_admin --local --file=./drizzle/schema.sql
+#    npx wrangler d1 execute openclaw_admin --remote --file=./drizzle/schema.sql
+#
+# 4. Seed the database:
+#    npx wrangler d1 execute openclaw_admin --local --file=./src/db/seed.sql
+#    npx wrangler d1 execute openclaw_admin --remote --file=./src/db/seed.sql
+#
+# 5. Start development:
+#    npm run dev
+
+
+[dev]
+ip = "0.0.0.0"
+port = 8787
+
+[[d1_databases]]
+binding = "DB"
+database_name = "openclaw_admin"
+database_id = "c2d6771b-f812-46f6-8d29-1bf21f64cde0"  # <-- REPLACE THIS WITH YOUR DATABASE ID
+
+# Vars for external OpenClaw integration
+[vars]
+OPENCLAW_MODE = "external"
+OPENCLAW_EXTERNAL_URL = ""
+
+# https://openclaw-admin-backend.rajeshkumarlawyer007.workers.dev
+
+# Uncomment for production deployment with custom domain
+# [[routes]]
+# pattern = "api.*"
+# zone_name = "your-domain.com"
+
+# Main route for the worker
+# [[routes]]
+# pattern = "*"
+# zone_name = "your-domain.com"
+
+# Worker settings
+#[ai]
+#binding = "AI"  # Enable Cloudflare AI binding for agent interactions
+
+# Secrets (set via wrangler secret commands)
+# npx wrangler secret put OPENCLAW_API_KEY
+# npx wrangler secret put OPENCLAW_URL

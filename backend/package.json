@@ -1,0 +1,44 @@
+{
+  "name": "openclaw-admin-backend",
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev src/index.ts",
+    "build": "tsc --noEmit",
+    "deploy": "wrangler deploy --minify src/index.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "db:seed": "wrangler d1 execute openclaw_admin --local --file=./src/db/seeds/001_seed_fresh.sql",
+    "db:seed:remote": "wrangler d1 execute openclaw_admin --remote --file=./src/db/seeds/001_seed_fresh.sql",
+    "db:backup": "wrangler d1 export openclaw_admin --output ./backups/backup_$(date +%Y%m%d_%H%M%S).sql",
+    "types:generate": "wrangler types",
+    "d1": "node scripts/d1.cjs",
+    "d1:schema:push": "node scripts/d1.cjs schema:push",
+    "d1:schema:push:remote": "node scripts/d1.cjs schema:push --remote",
+    "d1:seed:push": "node scripts/d1.cjs seed:push",
+    "d1:seed:push:remote": "node scripts/d1.cjs seed:push --remote",
+    "d1:data:local-to-remote": "node scripts/d1.cjs data:local-to-remote",
+    "d1:data:remote-to-local": "node scripts/d1.cjs data:remote-to-local",
+    "d1:reset": "node scripts/d1.cjs reset",
+    "d1:reset:remote": "node scripts/d1.cjs reset --remote",
+    "d1:sync": "node scripts/d1.cjs sync",
+    "d1:sync:remote": "node scripts/d1.cjs sync --remote --force",
+    "d1:deploy": "node scripts/d1.cjs deploy"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "axios": "^1.7.9",
+    "drizzle-kit": "^0.30.4",
+    "drizzle-orm": "^0.38.2",
+    "hono": "^4.6.9",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "@types/node": "^25.2.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "wrangler": "^3.114.17"
+  }
+}
