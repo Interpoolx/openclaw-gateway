@@ -24,6 +24,7 @@ import {
   OpenClawHttpClient,
   testOpenClawHttp,
   createGatewayAgent,
+  canUseCliFallback,
   createAgentViaCli,
   invokeOpenClawViaWebSocketAny,
   getChannelsViaCli,
@@ -39,6 +40,13 @@ import {
 } from './lib/openclaw-gateway';
 import { runFullDiagnostic } from './lib/openclaw-gateway/diagnostic';
 import { SkillsService } from './services/skills';
+import {
+  BuilderStatePayload,
+  ConfigTemplateRecord,
+  SourceMode,
+  generateConfig,
+} from './services/configBuilder';
+import { validateConfig } from './services/configValidator';
 
 // Types for environment
 interface Env {
@@ -47,6 +55,7 @@ interface Env {
   OPENCLAW_API_KEY: string;
   OPENCLAW_MODE: string;
   JWT_SECRET: string;
+  CONFIG_BUILDER_RATELIMIT_KV?: KVNamespace;
 }
 
 // Initialize Hono app
@@ -99,6 +108,34 @@ const DEMO_USERS: Record<string, { id: string; passwordHash: string; name: strin
     name: 'Super Admin',
     role: 'super_admin',
     avatar: 'https://ui-avatars.com/api/?name=Super+Admin&background=ef4444&color=fff',
+  },
+  'manager@clawpute.com': {
+    id: '0194f484-98c5-7634-9279-8b4b7f7e9145',
+    passwordHash: 'pbkdf2:100000:EIx8azTa9SITSAbtp9prHA==:VsQdnlJy9mXV6BA/ziWBnzwkuP7irJ3KNVzFeXDYdmk=',
+    name: 'Admin Manager',
+    role: 'admin',
+    avatar: 'https://ui-avatars.com/api/?name=Admin+Manager&background=f59e0b&color=fff',
+  },
+  'demo@clawpute.com': {
+    id: '0194f484-98c5-703d-8289-4b219f7e813a',
+    passwordHash: 'pbkdf2:100000:bp3CjQIs/auKdGpNqQ7OiA==:95l+NDqM/iVN22+oyUBlpeIRdshI9l9cRbzDDrqePME=',
+    name: 'Demo User',
+    role: 'user',
+    avatar: 'https://ui-avatars.com/api/?name=Demo+User&background=10b981&color=fff',
+  },
+  'advrajeshkumar90@gmail.com': {
+    id: '0194f484-98c6-7145-a472-874b7f7e2145',
+    passwordHash: 'pbkdf2:100000:roPeMkhUWFXD0Hn+3k6oZg==:sAqv0Ke0GMq16RlINcxoqH2ove9En+4Dd69keiysUvk=',
+    name: 'Rajesh Kumar',
+    role: 'super_admin',
+    avatar: 'https://ui-avatars.com/api/?name=Rajesh+Kumar&background=ef4444&color=fff',
+  },
+  'responsecenter247@gmail.com': {
+    id: '0194f484-98c5-703d-8289-4b219f7e813a',
+    passwordHash: 'pbkdf2:100000:rTdnnpeX/XOosBA1xEnREQ==:SG7tClAC5Amivd28wvrF0AhUoQ0Gpms5hoFCxBBDdRM=',
+    name: 'Response Center',
+    role: 'user',
+    avatar: 'https://ui-avatars.com/api/?name=Response+Center&background=10b981&color=fff',
   },
 };
 
@@ -180,8 +217,8 @@ app.post('/api/auth/demo-login', async (c) => {
     // Proactively check and create demo data if missing (idempotent)
     const demoDataUsers = [
       '0194f484-98c5-7ca5-9856-4b219f7e1234', // demo@clawpute.com
-      '0194f484-98c5-703d-8289-4b219f7e813a', //
-      '0194f484-98c6-7145-a472-874b7f7e2145'  //
+      '0194f484-98c5-703d-8289-4b219f7e813a', // responsecenter247@gmail.com
+      '0194f484-98c6-7145-a472-874b7f7e2145'  // advrajeshkumar90@gmail.com
     ];
 
     // EVERY user gets the 3 default agents
@@ -2374,6 +2411,17 @@ app.post('/api/openclaw/gateway-stats', async (c) => {
 });
 
 // Gateway health snapshot (separate endpoint for diagnostics UI)
+function cliFallbackUnavailableDiagnostics(): string[] {
+  return ['[cli] fallback unavailable in this runtime. Use a Node backend and set OPENCLAW_ENABLE_CLI_FALLBACK=true if CLI fallback is required.'];
+}
+
+function buildOptionalCliFallback<T>(
+  builder: () => Promise<{ items: T[]; diagnostics?: string[]; error?: string } | null>
+): (() => Promise<{ items: T[]; diagnostics?: string[]; error?: string } | null>) | undefined {
+  if (!canUseCliFallback()) return undefined;
+  return builder;
+}
+
 app.post('/api/openclaw/gateway-health', async (c) => {
   const body = await c.req.json();
   const { serverUrl, token } = body;
@@ -2490,26 +2538,9 @@ app.post('/api/openclaw/gateway-channels', async (c) => {
     const gatewayInfo = await discoverOpenClawInfo(serverUrl, token);
     const channels = gatewayInfo.channels ?? [];
     const connected = channels.length > 0 || (gatewayInfo.channelCount ?? 0) > 0;
-
-    if (!connected) {
-      const cliChannels = await getChannelsViaCli();
-      if (cliChannels.ok) {
-        const payload = cliChannels.payload ?? {};
-        const channelMap = (payload as any)?.channels;
-        const cliList = channelMap && typeof channelMap === 'object'
-          ? Object.entries(channelMap as Record<string, unknown>).map(([id, value]) => ({ id, ...(typeof value === 'object' && value ? value as Record<string, unknown> : {}) }))
-          : [];
-        return c.json({
-          success: true,
-          connected: true,
-          channels: cliList,
-          channelCount: cliList.length,
-          diagnostics: [...(gatewayInfo.diagnostics ?? []), ...cliChannels.diagnostics],
-          errorDetails: null,
-          timestamp: new Date().toISOString(),
-          source: 'cli',
-        });
-      }
+    const diagnostics = [...(gatewayInfo.diagnostics ?? [])];
+    if (!connected && !canUseCliFallback()) {
+      diagnostics.push(...cliFallbackUnavailableDiagnostics());
     }
 
     return c.json({
@@ -2517,7 +2548,7 @@ app.post('/api/openclaw/gateway-channels', async (c) => {
       connected,
       channels,
       channelCount: gatewayInfo.channelCount ?? 0,
-      diagnostics: gatewayInfo.diagnostics ?? [],
+      diagnostics,
       errorDetails: gatewayInfo.errorDetails ?? null,
       timestamp: new Date().toISOString(),
     });
@@ -2545,10 +2576,13 @@ app.post('/api/openclaw/gateway-chat-messages', async (c) => {
     kind: 'chat_messages',
     toolCandidates: ['chat.history', 'sessions.history', 'sessions_history', 'messages.list', 'messages_list'],
     httpCandidates: ['/api/messages', '/api/chat/messages', '/api/tasks/messages'],
-    cliFallback: async () => ({ items: [], diagnostics: ['[cli] chat message listing is not exposed by current CLI command set'] }),
+    cliFallback: buildOptionalCliFallback(async () => ({ items: [], diagnostics: ['[cli] chat message listing is not exposed by current CLI command set'] })),
   });
 
-  return c.json(result, result.success ? 200 : 503);
+  if (!result.success && !canUseCliFallback()) {
+    result.diagnostics = [...(result.diagnostics ?? []), ...cliFallbackUnavailableDiagnostics()];
+  }
+  return c.json(result);
 });
 
 app.post('/api/openclaw/gateway-sessions', async (c) => {
@@ -2562,17 +2596,20 @@ app.post('/api/openclaw/gateway-sessions', async (c) => {
     kind: 'sessions',
     toolCandidates: ['sessions.list', 'sessions_list', 'sessions.history', 'sessions_history'],
     httpCandidates: ['/api/sessions', '/api/session/list'],
-    cliFallback: async () => {
+    cliFallback: buildOptionalCliFallback(async () => {
       const cli = await getSessionsViaCli();
       if (!cli.ok) return { items: [], diagnostics: cli.diagnostics, error: cli.error };
       const sessions = Array.isArray((cli.payload as any)?.sessions)
         ? (cli.payload as any).sessions
         : (Array.isArray(cli.payload) ? cli.payload : []);
       return { items: sessions, diagnostics: cli.diagnostics };
-    },
+    }),
   });
 
-  return c.json(result, result.success ? 200 : 503);
+  if (!result.success && !canUseCliFallback()) {
+    result.diagnostics = [...(result.diagnostics ?? []), ...cliFallbackUnavailableDiagnostics()];
+  }
+  return c.json(result);
 });
 
 app.post('/api/openclaw/gateway-workspace-files', async (c) => {
@@ -2586,10 +2623,13 @@ app.post('/api/openclaw/gateway-workspace-files', async (c) => {
     kind: 'workspace_files',
     toolCandidates: ['agents.files.list', 'files.list', 'files_list', 'workspace.files', 'workspace_files'],
     httpCandidates: ['/api/files', '/api/workspace/files', '/api/workspaces/files'],
-    cliFallback: async () => ({ items: [], diagnostics: ['[cli] workspace file listing not available in current OpenClaw CLI'] }),
+    cliFallback: buildOptionalCliFallback(async () => ({ items: [], diagnostics: ['[cli] workspace file listing not available in current OpenClaw CLI'] })),
   });
 
-  return c.json(result, result.success ? 200 : 503);
+  if (!result.success && !canUseCliFallback()) {
+    result.diagnostics = [...(result.diagnostics ?? []), ...cliFallbackUnavailableDiagnostics()];
+  }
+  return c.json(result);
 });
 
 app.post('/api/openclaw/gateway-usage', async (c) => {
@@ -2603,17 +2643,20 @@ app.post('/api/openclaw/gateway-usage', async (c) => {
     kind: 'usage',
     toolCandidates: ['usage.cost', 'usage.stats', 'usage_stats', 'token_usage', 'billing_usage'],
     httpCandidates: ['/api/usage', '/api/token-usage', '/api/billing/usage'],
-    cliFallback: async () => {
+    cliFallback: buildOptionalCliFallback(async () => {
       const cli = await getUsageViaCli();
       if (!cli.ok) return { items: [], diagnostics: cli.diagnostics, error: cli.error };
       const daily = Array.isArray((cli.payload as any)?.daily)
         ? (cli.payload as any).daily
         : [];
       return { items: daily, diagnostics: cli.diagnostics };
-    },
+    }),
   });
 
-  return c.json(result, result.success ? 200 : 503);
+  if (!result.success && !canUseCliFallback()) {
+    result.diagnostics = [...(result.diagnostics ?? []), ...cliFallbackUnavailableDiagnostics()];
+  }
+  return c.json(result);
 });
 
 app.post('/api/openclaw/gateway-cron-jobs', async (c) => {
@@ -2627,17 +2670,20 @@ app.post('/api/openclaw/gateway-cron-jobs', async (c) => {
     kind: 'cron_jobs',
     toolCandidates: ['cron.list', 'cron_list', 'jobs.list', 'jobs_list'],
     httpCandidates: ['/api/cron', '/api/cron/jobs', '/api/jobs'],
-    cliFallback: async () => {
+    cliFallback: buildOptionalCliFallback(async () => {
       const cli = await getCronJobsViaCli();
       if (!cli.ok) return { items: [], diagnostics: cli.diagnostics, error: cli.error };
       const jobs = Array.isArray((cli.payload as any)?.jobs)
         ? (cli.payload as any).jobs
         : (Array.isArray(cli.payload) ? cli.payload : []);
       return { items: jobs, diagnostics: cli.diagnostics };
-    },
+    }),
   });
 
-  return c.json(result, result.success ? 200 : 503);
+  if (!result.success && !canUseCliFallback()) {
+    result.diagnostics = [...(result.diagnostics ?? []), ...cliFallbackUnavailableDiagnostics()];
+  }
+  return c.json(result);
 });
 
 app.post('/api/openclaw/gateway-skills', async (c) => {
@@ -2651,17 +2697,20 @@ app.post('/api/openclaw/gateway-skills', async (c) => {
     kind: 'skills',
     toolCandidates: ['skills.status', 'skills.list', 'skills_list', 'installed_skills'],
     httpCandidates: ['/api/skills', '/api/installed-skills'],
-    cliFallback: async () => {
+    cliFallback: buildOptionalCliFallback(async () => {
       const cli = await getSkillsViaCli();
       if (!cli.ok) return { items: [], diagnostics: cli.diagnostics, error: cli.error };
       const skills = Array.isArray((cli.payload as any)?.skills)
         ? (cli.payload as any).skills
         : (Array.isArray(cli.payload) ? cli.payload : []);
       return { items: skills, diagnostics: cli.diagnostics };
-    },
+    }),
   });
 
-  return c.json(result, result.success ? 200 : 503);
+  if (!result.success && !canUseCliFallback()) {
+    result.diagnostics = [...(result.diagnostics ?? []), ...cliFallbackUnavailableDiagnostics()];
+  }
+  return c.json(result);
 });
 
 app.post('/api/openclaw/gateway-logs', async (c) => {
@@ -2675,15 +2724,18 @@ app.post('/api/openclaw/gateway-logs', async (c) => {
     kind: 'logs',
     toolCandidates: ['logs.tail', 'logs_tail', 'session.status', 'session_status'],
     httpCandidates: ['/api/logs', '/api/system/logs'],
-    cliFallback: async () => {
+    cliFallback: buildOptionalCliFallback(async () => {
       const cli = await getLogsViaCli();
       if (!cli.ok) return { items: [], diagnostics: cli.diagnostics, error: cli.error };
       const items = Array.isArray(cli.payload) ? cli.payload : [cli.payload];
       return { items, diagnostics: cli.diagnostics };
-    },
+    }),
   });
 
-  return c.json(result, result.success ? 200 : 503);
+  if (!result.success && !canUseCliFallback()) {
+    result.diagnostics = [...(result.diagnostics ?? []), ...cliFallbackUnavailableDiagnostics()];
+  }
+  return c.json(result);
 });
 
 app.post('/api/openclaw/send-message', async (c) => {
@@ -2862,31 +2914,45 @@ app.post('/api/openclaw/gateway-config', async (c) => {
     diagnostics.push(`HTTP fallback failed: ${response.status}`);
     if (errorBody) diagnostics.push(errorBody.slice(0, 200));
 
-    const cliConfig = await getGatewayConfigViaCli();
-    if (cliConfig.ok) {
+    if (!canUseCliFallback()) {
+      diagnostics.push(...cliFallbackUnavailableDiagnostics());
+    } else {
+      const cliConfig = await getGatewayConfigViaCli();
+      if (cliConfig.ok) {
+        diagnostics.push(...cliConfig.diagnostics);
+        return c.json({
+          success: true,
+          config: cliConfig.payload,
+          source: 'cli',
+          diagnostics,
+        });
+      }
       diagnostics.push(...cliConfig.diagnostics);
-      return c.json({
-        success: true,
-        config: cliConfig.payload,
-        source: 'cli',
-        diagnostics,
-      });
     }
 
     return c.json({
       success: false,
       error: `Failed to fetch config: HTTP ${response.status}`,
-      details: errorBody || cliConfig.error || 'No response body',
+      details: errorBody || 'No response body',
       source: 'none',
-      diagnostics: [...diagnostics, ...cliConfig.diagnostics],
+      diagnostics,
     });
   } catch (error) {
-    const cliConfig = await getGatewayConfigViaCli();
-    if (cliConfig.ok) {
+    if (canUseCliFallback()) {
+      const cliConfig = await getGatewayConfigViaCli();
+      if (cliConfig.ok) {
+        return c.json({
+          success: true,
+          config: cliConfig.payload,
+          source: 'cli',
+          diagnostics: cliConfig.diagnostics,
+        });
+      }
       return c.json({
-        success: true,
-        config: cliConfig.payload,
-        source: 'cli',
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        details: cliConfig.error || 'Failed to connect to OpenClaw Gateway',
+        source: 'none',
         diagnostics: cliConfig.diagnostics,
       });
     }
@@ -2895,7 +2961,7 @@ app.post('/api/openclaw/gateway-config', async (c) => {
       error: error instanceof Error ? error.message : 'Unknown error',
       details: 'Failed to connect to OpenClaw Gateway',
       source: 'none',
-      diagnostics: cliConfig.diagnostics,
+      diagnostics: cliFallbackUnavailableDiagnostics(),
     });
   }
 });
@@ -2960,7 +3026,7 @@ app.post('/api/openclaw/gateway-config-update', async (c) => {
       error: `Failed to update config: ${response.status} - ${errorText || 'No response body'}`,
       source: 'none',
       diagnostics,
-    }, 503);
+    });
   } catch (error) {
     return c.json({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500);
   }
@@ -3377,10 +3443,16 @@ app.post('/api/openclaw/push-agents', async (c) => {
           pushedCount++;
           results.push({ id: agent.id, name: agent.name, action: 'pushed' });
         } else {
-          const canUseCliFallback = Boolean(useCliFallback);
+          const canUseCliForAgent = Boolean(useCliFallback) && canUseCliFallback();
 
-          if (!canUseCliFallback) {
-            results.push({ id: agent.id, name: agent.name, action: 'failed', error: createResult.error ?? 'Unsupported by gateway profile' });
+          if (!canUseCliForAgent) {
+            results.push({
+              id: agent.id,
+              name: agent.name,
+              action: 'failed',
+              error: createResult.error ?? 'Unsupported by gateway profile',
+              diagnostics: cliFallbackUnavailableDiagnostics(),
+            });
             continue;
           }
 
@@ -5243,6 +5315,805 @@ app.delete('/api/openclaw/connection/:id', async (c) => {
   }
 });
 
+// ========== CONFIG BUILDER API ==========
+
+const configBuilderResponseCache = new Map<string, { expiresAt: number; payload: unknown }>();
+const configBuilderLocalRateLimit = new Map<string, { count: number; expiresAt: number }>();
+
+function createEntityId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function toInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseJsonText<T>(value: string | null | undefined, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+    .slice(0, 80);
+}
+
+function getClientIp(c: any): string {
+  const cfConnectingIp = c.req.header('CF-Connecting-IP');
+  if (cfConnectingIp && cfConnectingIp.trim().length > 0) {
+    return cfConnectingIp.trim();
+  }
+  const xForwardedFor = c.req.header('X-Forwarded-For');
+  if (xForwardedFor && xForwardedFor.trim().length > 0) {
+    return xForwardedFor.split(',')[0]?.trim() || 'unknown';
+  }
+  return 'unknown';
+}
+
+async function enforceRateLimit(
+  c: any,
+  bucket: string,
+  maxRequests: number,
+  ttlSeconds: number
+): Promise<Response | null> {
+  const ip = getClientIp(c);
+  const key = `ratelimit:${bucket}:${ip}`;
+  const now = Date.now();
+  const kv = c.env.CONFIG_BUILDER_RATELIMIT_KV;
+
+  if (kv) {
+    const countRaw = await kv.get(key);
+    const count = Number.parseInt(countRaw ?? '0', 10) || 0;
+    if (count >= maxRequests) {
+      return c.json({ error: 'Rate limited' }, 429);
+    }
+    await kv.put(key, String(count + 1), { expirationTtl: ttlSeconds });
+    return null;
+  }
+
+  const localBucket = configBuilderLocalRateLimit.get(key);
+  if (!localBucket || localBucket.expiresAt <= now) {
+    configBuilderLocalRateLimit.set(key, { count: 1, expiresAt: now + ttlSeconds * 1000 });
+    return null;
+  }
+
+  if (localBucket.count >= maxRequests) {
+    return c.json({ error: 'Rate limited' }, 429);
+  }
+
+  localBucket.count += 1;
+  configBuilderLocalRateLimit.set(key, localBucket);
+  return null;
+}
+
+function serializeTemplate(template: schema.ConfigTemplate): Record<string, unknown> {
+  return {
+    id: template.id,
+    workspaceId: template.workspaceId,
+    slug: template.slug,
+    name: template.name,
+    description: template.description,
+    goal: template.goal,
+    category: template.category,
+    templateType: template.templateType,
+    channels: parseJsonText<string[]>(template.channels, []),
+    providers: parseJsonText<string[]>(template.providers, []),
+    tags: parseJsonText<string[]>(template.tags, []),
+    baseConfigJson: template.baseConfigJson,
+    defaultOptionsJson: template.defaultOptionsJson,
+    schemaJson: template.schemaJson,
+    isOfficial: !!template.isOfficial,
+    isFeatured: !!template.isFeatured,
+    isActive: !!template.isActive,
+    createdAt: template.createdAt,
+    updatedAt: template.updatedAt,
+  };
+}
+
+async function requireWorkspaceMembershipOrFail(
+  c: any,
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  workspaceId: string
+) {
+  const workspaceContext = await getWorkspaceById(db, userId, workspaceId);
+  if (!workspaceContext) {
+    return c.json({ error: 'Workspace not found or access denied' }, 404);
+  }
+  return workspaceContext;
+}
+
+async function createConfigSetupVersion(params: {
+  db: ReturnType<typeof getDb>;
+  setupId: string;
+  configJson: string;
+  optionsJson: string;
+  createdByUserId: string;
+}) {
+  const { db, setupId, configJson, optionsJson, createdByUserId } = params;
+  const maxVersionResult = await db
+    .select({ maxVersion: sql<number>`COALESCE(MAX(${schema.configSetupVersions.version}), 0)` })
+    .from(schema.configSetupVersions)
+    .where(eq(schema.configSetupVersions.setupId, setupId));
+  const nextVersion = (maxVersionResult[0]?.maxVersion ?? 0) + 1;
+
+  await db.insert(schema.configSetupVersions).values({
+    id: createEntityId('cfgv'),
+    setupId,
+    version: nextVersion,
+    configJson,
+    optionsJson,
+    createdByUserId,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+// Public: List templates
+app.get('/api/config-builder/templates', async (c) => {
+  const rateLimitResponse = await enforceRateLimit(c, 'config-builder-templates', 60, 60);
+  if (rateLimitResponse) return rateLimitResponse;
+
+  const db = getDb(c.env);
+  const goal = (c.req.query('goal') ?? '').trim().toLowerCase();
+  const channel = (c.req.query('channel') ?? '').trim().toLowerCase();
+  const provider = (c.req.query('provider') ?? '').trim().toLowerCase();
+  const search = (c.req.query('search') ?? '').trim().toLowerCase();
+  const limit = Math.min(toInteger(c.req.query('limit'), 20), 100);
+  const offset = Math.max(toInteger(c.req.query('offset'), 0), 0);
+
+  try {
+    const rows = await db
+      .select()
+      .from(schema.configTemplates)
+      .where(and(
+        eq(schema.configTemplates.isActive, true),
+        sql`(${schema.configTemplates.isOfficial} = 1 OR ${schema.configTemplates.workspaceId} IS NULL)`
+      ))
+      .orderBy(schema.configTemplates.name);
+
+    const filtered = rows.filter((row) => {
+      if (goal && row.goal.toLowerCase() !== goal) return false;
+      const channels = parseJsonText<string[]>(row.channels, []).map((item) => item.toLowerCase());
+      if (channel && !channels.includes(channel)) return false;
+      const providers = parseJsonText<string[]>(row.providers, []).map((item) => item.toLowerCase());
+      if (provider && !providers.includes(provider)) return false;
+      if (search) {
+        const haystack = `${row.name} ${row.description ?? ''} ${row.slug}`.toLowerCase();
+        if (!haystack.includes(search)) return false;
+      }
+      return true;
+    });
+
+    const paginated = filtered.slice(offset, offset + limit).map(serializeTemplate);
+    return c.json({
+      templates: paginated,
+      total: filtered.length,
+      limit,
+      offset,
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Public: Get template detail
+app.get('/api/config-builder/templates/:slug', async (c) => {
+  const rateLimitResponse = await enforceRateLimit(c, 'config-builder-template-detail', 60, 60);
+  if (rateLimitResponse) return rateLimitResponse;
+
+  const db = getDb(c.env);
+  const slug = c.req.param('slug');
+
+  try {
+    const [template] = await db
+      .select()
+      .from(schema.configTemplates)
+      .where(and(
+        eq(schema.configTemplates.slug, slug),
+        eq(schema.configTemplates.isActive, true),
+        sql`(${schema.configTemplates.isOfficial} = 1 OR ${schema.configTemplates.workspaceId} IS NULL)`
+      ));
+
+    if (!template) return c.json({ error: 'Template not found' }, 404);
+    return c.json(serializeTemplate(template));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Public: Generate config
+app.post('/api/config-builder/generate', async (c) => {
+  const rateLimitResponse = await enforceRateLimit(c, 'config-builder-generate', 20, 60);
+  if (rateLimitResponse) return rateLimitResponse;
+
+  const db = getDb(c.env);
+
+  try {
+    const body = await c.req.json() as {
+      mode?: SourceMode;
+      templateId?: string;
+      options?: BuilderStatePayload;
+    };
+
+    const mode = body.mode;
+    if (!mode || !['template', 'builder', 'import'].includes(mode)) {
+      return c.json({ error: 'mode must be one of template|builder|import' }, 400);
+    }
+
+    const options = body.options ?? {};
+    const optionsJson = JSON.stringify(options);
+    if (optionsJson.length > 65536) {
+      return c.json({ error: 'Payload too large. Options must be under 64KB.' }, 413);
+    }
+
+    const cacheKey = JSON.stringify({
+      templateId: body.templateId ?? null,
+      mode,
+      options,
+    });
+    const now = Date.now();
+    const cached = configBuilderResponseCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return c.json(cached.payload);
+    }
+
+    let template: ConfigTemplateRecord | null = null;
+    if (body.templateId) {
+      const [templateRow] = await db
+        .select()
+        .from(schema.configTemplates)
+        .where(and(
+          eq(schema.configTemplates.id, body.templateId),
+          eq(schema.configTemplates.isActive, true)
+        ));
+      if (templateRow) {
+        template = {
+          id: templateRow.id,
+          slug: templateRow.slug,
+          name: templateRow.name,
+          description: templateRow.description,
+          goal: templateRow.goal,
+          channels: templateRow.channels ?? '[]',
+          providers: templateRow.providers ?? '[]',
+          baseConfigJson: templateRow.baseConfigJson,
+          defaultOptionsJson: templateRow.defaultOptionsJson ?? '{}',
+          schemaJson: templateRow.schemaJson ?? '{}',
+        };
+      }
+    }
+
+    const generated = generateConfig({
+      mode,
+      template,
+      builderState: options,
+    });
+
+    const configString = JSON.stringify(generated.configJson, null, 2);
+    const payload = {
+      configJson: generated.configJson,
+      summary: generated.summary,
+      meta: {
+        status: generated.status,
+        generatedAt: new Date().toISOString(),
+        lineCount: configString.split('\n').length,
+        sizeBytes: configString.length,
+      },
+      warnings: generated.warnings,
+      errors: generated.errors,
+      info: generated.info,
+    };
+
+    configBuilderResponseCache.set(cacheKey, {
+      expiresAt: now + 60 * 1000,
+      payload,
+    });
+
+    return c.json(payload);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Public: Validate config
+app.post('/api/config-builder/validate', async (c) => {
+  const rateLimitResponse = await enforceRateLimit(c, 'config-builder-validate', 30, 60);
+  if (rateLimitResponse) return rateLimitResponse;
+
+  try {
+    const body = await c.req.json() as { configJson?: string | Record<string, unknown> };
+    if (body.configJson === undefined) {
+      return c.json({ error: 'configJson is required' }, 400);
+    }
+
+    const validation = validateConfig(body.configJson);
+    return c.json(validation);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Auth: list saved setups
+app.get('/api/config-builder/setups', async (c) => {
+  const db = getDb(c.env);
+  const user = await getUserFromToken(c);
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  const workspaceId = c.req.query('workspaceId');
+  if (!workspaceId) return c.json({ error: 'workspaceId is required' }, 400);
+
+  const includeDeleted = c.req.query('includeDeleted') === 'true';
+  const access = await requireWorkspaceMembershipOrFail(c, db, user.userId, workspaceId);
+  if (access instanceof Response) return access;
+
+  try {
+    const whereClause = includeDeleted
+      ? eq(schema.configSetups.workspaceId, workspaceId)
+      : and(eq(schema.configSetups.workspaceId, workspaceId), sql`${schema.configSetups.deletedAt} IS NULL`);
+
+    const setups = await db
+      .select()
+      .from(schema.configSetups)
+      .where(whereClause)
+      .orderBy(desc(schema.configSetups.updatedAt));
+
+    return c.json({
+      setups: setups.map((setup) => ({
+        ...setup,
+        optionsJson: parseJsonText<Record<string, unknown>>(setup.optionsJson, {}),
+        configJson: parseJsonText<Record<string, unknown>>(setup.configJson, {}),
+      })),
+      total: setups.length,
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Auth: create saved setup
+app.post('/api/config-builder/setups', async (c) => {
+  const db = getDb(c.env);
+  const user = await getUserFromToken(c);
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  try {
+    const body = await c.req.json() as {
+      workspaceId?: string;
+      name?: string;
+      sourceMode?: SourceMode;
+      templateId?: string | null;
+      optionsJson?: Record<string, unknown> | string;
+      configJson?: Record<string, unknown> | string;
+      summary?: string;
+      isPublic?: boolean;
+    };
+
+    if (!body.workspaceId) return c.json({ error: 'workspaceId is required' }, 400);
+    if (!body.configJson) return c.json({ error: 'configJson is required' }, 400);
+
+    const workspaceContext = await requireWorkspaceMembershipOrFail(c, db, user.userId, body.workspaceId);
+    if (workspaceContext instanceof Response) return workspaceContext;
+    if (!hasWorkspacePermission(workspaceContext.memberRole, 'member')) {
+      return c.json({ error: 'Insufficient permissions' }, 403);
+    }
+
+    const configString = typeof body.configJson === 'string' ? body.configJson : JSON.stringify(body.configJson);
+    if (configString.length > 65536) {
+      return c.json({ error: 'Payload too large. Config must be under 64KB.' }, 413);
+    }
+
+    let templateName = 'Custom Setup';
+    if (body.templateId) {
+      const [template] = await db.select().from(schema.configTemplates).where(eq(schema.configTemplates.id, body.templateId));
+      if (template) templateName = template.name;
+    }
+
+    const dateLabel = new Date().toISOString().slice(0, 10);
+    const name = body.name?.trim() || `${templateName} - ${dateLabel}`;
+    const setupId = createEntityId('cfg');
+    const nowIso = new Date().toISOString();
+    const sourceMode = body.sourceMode ?? 'builder';
+    const optionsJson = typeof body.optionsJson === 'string'
+      ? body.optionsJson
+      : JSON.stringify(body.optionsJson ?? {});
+
+    await db.insert(schema.configSetups).values({
+      id: setupId,
+      workspaceId: body.workspaceId,
+      userId: user.userId,
+      name,
+      slug: `${slugify(name)}-${Date.now().toString().slice(-6)}`,
+      sourceMode,
+      templateId: body.templateId ?? null,
+      optionsJson,
+      configJson: configString,
+      summary: body.summary ?? null,
+      isPublic: body.isPublic === true,
+      downloads: 0,
+      deletedAt: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    await createConfigSetupVersion({
+      db,
+      setupId,
+      configJson: configString,
+      optionsJson,
+      createdByUserId: user.userId,
+    });
+
+    const [setup] = await db.select().from(schema.configSetups).where(eq(schema.configSetups.id, setupId));
+    return c.json({
+      success: true,
+      setup: setup ? {
+        ...setup,
+        optionsJson: parseJsonText<Record<string, unknown>>(setup.optionsJson, {}),
+        configJson: parseJsonText<Record<string, unknown>>(setup.configJson, {}),
+      } : null,
+    }, 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Auth: get setup by id
+app.get('/api/config-builder/setups/:id', async (c) => {
+  const db = getDb(c.env);
+  const user = await getUserFromToken(c);
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  try {
+    const setupId = c.req.param('id');
+    const [setup] = await db.select().from(schema.configSetups).where(eq(schema.configSetups.id, setupId));
+    if (!setup) return c.json({ error: 'Setup not found' }, 404);
+
+    const access = await requireWorkspaceMembershipOrFail(c, db, user.userId, setup.workspaceId ?? '');
+    if (access instanceof Response) return access;
+
+    return c.json({
+      ...setup,
+      optionsJson: parseJsonText<Record<string, unknown>>(setup.optionsJson, {}),
+      configJson: parseJsonText<Record<string, unknown>>(setup.configJson, {}),
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Auth: update setup
+app.patch('/api/config-builder/setups/:id', async (c) => {
+  const db = getDb(c.env);
+  const user = await getUserFromToken(c);
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  try {
+    const setupId = c.req.param('id');
+    const body = await c.req.json() as {
+      name?: string;
+      optionsJson?: Record<string, unknown> | string;
+      configJson?: Record<string, unknown> | string;
+      summary?: string | null;
+      isPublic?: boolean;
+      sourceMode?: SourceMode;
+    };
+
+    const [setup] = await db
+      .select()
+      .from(schema.configSetups)
+      .where(and(eq(schema.configSetups.id, setupId), eq(schema.configSetups.userId, user.userId)));
+
+    if (!setup) return c.json({ error: 'Setup not found' }, 404);
+
+    const access = await requireWorkspaceMembershipOrFail(c, db, user.userId, setup.workspaceId ?? '');
+    if (access instanceof Response) return access;
+    if (!hasWorkspacePermission(access.memberRole, 'member')) {
+      return c.json({ error: 'Insufficient permissions' }, 403);
+    }
+
+    const updates: Partial<schema.NewConfigSetup> = {
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (typeof body.name === 'string' && body.name.trim()) {
+      updates.name = body.name.trim();
+    }
+    if (typeof body.summary === 'string' || body.summary === null) {
+      updates.summary = body.summary;
+    }
+    if (typeof body.isPublic === 'boolean') {
+      updates.isPublic = body.isPublic;
+    }
+    if (body.sourceMode && ['template', 'builder', 'import'].includes(body.sourceMode)) {
+      updates.sourceMode = body.sourceMode;
+    }
+
+    let shouldCreateVersion = false;
+    let nextConfigJson = setup.configJson;
+    let nextOptionsJson = setup.optionsJson ?? '{}';
+
+    if (body.configJson !== undefined) {
+      nextConfigJson = typeof body.configJson === 'string' ? body.configJson : JSON.stringify(body.configJson);
+      if (nextConfigJson.length > 65536) {
+        return c.json({ error: 'Payload too large. Config must be under 64KB.' }, 413);
+      }
+      updates.configJson = nextConfigJson;
+      shouldCreateVersion = true;
+    }
+
+    if (body.optionsJson !== undefined) {
+      nextOptionsJson = typeof body.optionsJson === 'string' ? body.optionsJson : JSON.stringify(body.optionsJson);
+      updates.optionsJson = nextOptionsJson;
+      shouldCreateVersion = true;
+    }
+
+    await db
+      .update(schema.configSetups)
+      .set(updates)
+      .where(and(eq(schema.configSetups.id, setupId), eq(schema.configSetups.userId, user.userId)));
+
+    if (shouldCreateVersion) {
+      await createConfigSetupVersion({
+        db,
+        setupId,
+        configJson: nextConfigJson,
+        optionsJson: nextOptionsJson,
+        createdByUserId: user.userId,
+      });
+    }
+
+    const [updated] = await db.select().from(schema.configSetups).where(eq(schema.configSetups.id, setupId));
+    return c.json({
+      success: true,
+      setup: updated ? {
+        ...updated,
+        optionsJson: parseJsonText<Record<string, unknown>>(updated.optionsJson, {}),
+        configJson: parseJsonText<Record<string, unknown>>(updated.configJson, {}),
+      } : null,
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Auth: soft delete setup
+app.delete('/api/config-builder/setups/:id', async (c) => {
+  const db = getDb(c.env);
+  const user = await getUserFromToken(c);
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  try {
+    const setupId = c.req.param('id');
+    const [setup] = await db
+      .select()
+      .from(schema.configSetups)
+      .where(and(eq(schema.configSetups.id, setupId), eq(schema.configSetups.userId, user.userId)));
+    if (!setup) return c.json({ error: 'Setup not found' }, 404);
+
+    const access = await requireWorkspaceMembershipOrFail(c, db, user.userId, setup.workspaceId ?? '');
+    if (access instanceof Response) return access;
+    if (!hasWorkspacePermission(access.memberRole, 'member')) {
+      return c.json({ error: 'Insufficient permissions' }, 403);
+    }
+
+    await db
+      .update(schema.configSetups)
+      .set({
+        deletedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+      .where(and(eq(schema.configSetups.id, setupId), eq(schema.configSetups.userId, user.userId)));
+
+    return c.json({ success: true });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Auth: restore soft deleted setup (within 30 days)
+app.post('/api/config-builder/setups/:id/restore', async (c) => {
+  const db = getDb(c.env);
+  const user = await getUserFromToken(c);
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  try {
+    const setupId = c.req.param('id');
+    const [setup] = await db
+      .select()
+      .from(schema.configSetups)
+      .where(and(eq(schema.configSetups.id, setupId), eq(schema.configSetups.userId, user.userId)));
+    if (!setup) return c.json({ error: 'Setup not found' }, 404);
+    if (!setup.deletedAt) return c.json({ error: 'Setup is not deleted' }, 400);
+
+    const deletedAtMs = new Date(setup.deletedAt).getTime();
+    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+    if (Number.isFinite(deletedAtMs) && Date.now() - deletedAtMs > thirtyDaysMs) {
+      return c.json({ error: 'Restore window expired (30 days).' }, 410);
+    }
+
+    await db
+      .update(schema.configSetups)
+      .set({
+        deletedAt: null,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(and(eq(schema.configSetups.id, setupId), eq(schema.configSetups.userId, user.userId)));
+
+    return c.json({ success: true });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Auth: duplicate setup
+app.post('/api/config-builder/setups/:id/duplicate', async (c) => {
+  const db = getDb(c.env);
+  const user = await getUserFromToken(c);
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  try {
+    const setupId = c.req.param('id');
+    const [sourceSetup] = await db
+      .select()
+      .from(schema.configSetups)
+      .where(eq(schema.configSetups.id, setupId));
+    if (!sourceSetup) return c.json({ error: 'Setup not found' }, 404);
+
+    const access = await requireWorkspaceMembershipOrFail(c, db, user.userId, sourceSetup.workspaceId ?? '');
+    if (access instanceof Response) return access;
+    if (!hasWorkspacePermission(access.memberRole, 'member')) {
+      return c.json({ error: 'Insufficient permissions' }, 403);
+    }
+
+    const newSetupId = createEntityId('cfg');
+    const nowIso = new Date().toISOString();
+    const duplicateName = `${sourceSetup.name} (Copy)`;
+    const duplicateSlug = `${slugify(duplicateName)}-${Date.now().toString().slice(-6)}`;
+
+    await db.insert(schema.configSetups).values({
+      id: newSetupId,
+      workspaceId: sourceSetup.workspaceId,
+      userId: user.userId,
+      name: duplicateName,
+      slug: duplicateSlug,
+      sourceMode: sourceSetup.sourceMode,
+      templateId: sourceSetup.templateId,
+      optionsJson: sourceSetup.optionsJson,
+      configJson: sourceSetup.configJson,
+      summary: sourceSetup.summary,
+      isPublic: false,
+      downloads: 0,
+      lastDownloadedAt: null,
+      deletedAt: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    await createConfigSetupVersion({
+      db,
+      setupId: newSetupId,
+      configJson: sourceSetup.configJson,
+      optionsJson: sourceSetup.optionsJson ?? '{}',
+      createdByUserId: user.userId,
+    });
+
+    const [duplicated] = await db.select().from(schema.configSetups).where(eq(schema.configSetups.id, newSetupId));
+    return c.json({
+      success: true,
+      setup: duplicated ? {
+        ...duplicated,
+        optionsJson: parseJsonText<Record<string, unknown>>(duplicated.optionsJson, {}),
+        configJson: parseJsonText<Record<string, unknown>>(duplicated.configJson, {}),
+      } : null,
+    }, 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Auth: list setup versions (Phase 3)
+app.get('/api/config-builder/setups/:id/versions', async (c) => {
+  const db = getDb(c.env);
+  const user = await getUserFromToken(c);
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  try {
+    const setupId = c.req.param('id');
+    const [setup] = await db.select().from(schema.configSetups).where(eq(schema.configSetups.id, setupId));
+    if (!setup) return c.json({ error: 'Setup not found' }, 404);
+
+    const access = await requireWorkspaceMembershipOrFail(c, db, user.userId, setup.workspaceId ?? '');
+    if (access instanceof Response) return access;
+
+    const versions = await db
+      .select()
+      .from(schema.configSetupVersions)
+      .where(eq(schema.configSetupVersions.setupId, setupId))
+      .orderBy(desc(schema.configSetupVersions.version));
+
+    return c.json({
+      versions: versions.map((version) => ({
+        ...version,
+        optionsJson: parseJsonText<Record<string, unknown>>(version.optionsJson, {}),
+        configJson: parseJsonText<Record<string, unknown>>(version.configJson, {}),
+      })),
+      total: versions.length,
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Auth: mark download event
+app.post('/api/config-builder/setups/:id/downloaded', async (c) => {
+  const db = getDb(c.env);
+  const user = await getUserFromToken(c);
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  try {
+    const setupId = c.req.param('id');
+    const [setup] = await db.select().from(schema.configSetups).where(eq(schema.configSetups.id, setupId));
+    if (!setup) return c.json({ error: 'Setup not found' }, 404);
+
+    const access = await requireWorkspaceMembershipOrFail(c, db, user.userId, setup.workspaceId ?? '');
+    if (access instanceof Response) return access;
+
+    await db
+      .update(schema.configSetups)
+      .set({
+        downloads: (setup.downloads ?? 0) + 1,
+        lastDownloadedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.configSetups.id, setupId));
+
+    return c.json({ success: true });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
+// Public: get shareable setup (Phase 3)
+app.get('/api/config-builder/public/:id', async (c) => {
+  const rateLimitResponse = await enforceRateLimit(c, 'config-builder-public-setup', 60, 60);
+  if (rateLimitResponse) return rateLimitResponse;
+
+  const db = getDb(c.env);
+  const setupId = c.req.param('id');
+
+  try {
+    const [setup] = await db
+      .select()
+      .from(schema.configSetups)
+      .where(and(
+        eq(schema.configSetups.id, setupId),
+        eq(schema.configSetups.isPublic, true),
+        sql`${schema.configSetups.deletedAt} IS NULL`
+      ));
+
+    if (!setup) return c.json({ error: 'Setup not found' }, 404);
+    return c.json({
+      id: setup.id,
+      name: setup.name,
+      summary: setup.summary,
+      sourceMode: setup.sourceMode,
+      configJson: parseJsonText<Record<string, unknown>>(setup.configJson, {}),
+      createdAt: setup.createdAt,
+      updatedAt: setup.updatedAt,
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+  }
+});
+
 // ========== WORKSPACE API ==========
 
 import {
@@ -6108,6 +6979,21 @@ app.post('/api/devlogs/generate-from-session', async (c) => {
   }
 });
 
-// Export for Cloudflare Workers
-export default app;
+async function cleanupSoftDeletedConfigSetups(env: Env): Promise<void> {
+  const db = getDb(env);
+  await db
+    .delete(schema.configSetups)
+    .where(sql`${schema.configSetups.deletedAt} IS NOT NULL AND datetime(${schema.configSetups.deletedAt}) <= datetime('now', '-30 day')`);
+}
+
+import gatewayWsRoute from './routes/gateway-ws'
+app.route('/api/gateway/ws', gatewayWsRoute)
+
+// Export for Cloudflare Workers (fetch + scheduled cron)
+export default {
+  fetch: app.fetch,
+  scheduled: async (_event: ScheduledEvent, env: Env, ctx: ExecutionContext) => {
+    ctx.waitUntil(cleanupSoftDeletedConfigSetups(env));
+  },
+};
 

@@ -1,6 +1,6 @@
 export * from './types';
 export * from './url';
-export { queryOpenClawViaWebSocket, testOpenClawWebSocket } from './ws-client';
+export { queryOpenClawViaWebSocket, testOpenClawWebSocket, invokeOpenClawViaWebSocketAny } from './ws-client';
 export { queryOpenClawViaHttp, testOpenClawHttp, OpenClawHttpClient } from './http-client';
 export { discoverOpenClawInfo } from './discovery';
 export {
@@ -10,6 +10,9 @@ export {
   fetchGatewayDataset,
 } from './bridge-service';
 export {
+  canUseCliFallback,
+  isCliFallbackEnabledByEnv,
+  isCliRuntimeAvailable,
   createAgentViaCli,
   getGatewayStatusViaCli,
   getGatewayConfigViaCli,

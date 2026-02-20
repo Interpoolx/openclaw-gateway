@@ -98,25 +98,9 @@ export async function discoverOpenClawInfo(serverUrl: string, token: string): Pr
 
   diagnostics.push(
     isLocal
-      ? 'Using HTTP API first (local gateway mode)...'
-      : 'Using HTTP API first (remote gateway mode - avoids Control UI origin restrictions)...'
+      ? 'Using WebSocket API first (local gateway mode)...'
+      : 'Using WebSocket API first (remote gateway mode)...'
   );
-  try {
-    const httpResult = await queryOpenClawViaHttp({
-      serverUrl,
-      token,
-      sessionKey: 'agent:main:main',
-      timeout: 15000,
-    });
-    if (httpResult.diagnostics) diagnostics.push(...httpResult.diagnostics);
-    diagnostics.push('HTTP API query successful');
-    return { ...httpResult, diagnostics };
-  } catch (httpError) {
-    diagnostics.push(`HTTP first-pass failed: ${httpError instanceof Error ? httpError.message : 'Unknown error'}`);
-    diagnostics.push('Falling back to WebSocket API...');
-  }
-
-  diagnostics.push(isLocal ? 'Using WebSocket API...' : 'Using WebSocket API (fallback only)...');
   try {
     const wsResult = await queryOpenClawViaWebSocket({
       serverUrl,
@@ -124,15 +108,15 @@ export async function discoverOpenClawInfo(serverUrl: string, token: string): Pr
       sessionKey: 'agent:main:main',
       timeout: 15000,
     });
-
     if (wsResult.diagnostics) diagnostics.push(...wsResult.diagnostics);
     diagnostics.push('WebSocket query successful');
     return { ...wsResult, diagnostics };
   } catch (wsError) {
-    diagnostics.push(`WebSocket failed: ${wsError instanceof Error ? wsError.message : 'Unknown error'}`);
+    diagnostics.push(`WebSocket first-pass failed: ${wsError instanceof Error ? wsError.message : 'Unknown error'}`);
     diagnostics.push('Falling back to HTTP API...');
   }
 
+  diagnostics.push(isLocal ? 'Using HTTP API...' : 'Using HTTP API (fallback)...');
   try {
     const httpResult = await queryOpenClawViaHttp({
       serverUrl,
@@ -140,11 +124,26 @@ export async function discoverOpenClawInfo(serverUrl: string, token: string): Pr
       sessionKey: 'agent:main:main',
       timeout: 15000,
     });
+
     if (httpResult.diagnostics) diagnostics.push(...httpResult.diagnostics);
     diagnostics.push('HTTP API fallback successful');
     return { ...httpResult, diagnostics };
   } catch (httpError) {
-    diagnostics.push(`HTTP fallback also failed: ${httpError instanceof Error ? httpError.message : 'Unknown error'}`);
+    diagnostics.push(`HTTP fallback failed: ${httpError instanceof Error ? httpError.message : 'Unknown error'}`);
+  }
+
+  try {
+    const wsResult = await queryOpenClawViaWebSocket({
+      serverUrl,
+      token,
+      sessionKey: 'agent:main:main',
+      timeout: 15000,
+    });
+    if (wsResult.diagnostics) diagnostics.push(...wsResult.diagnostics);
+    diagnostics.push('WebSocket final fallback successful');
+    return { ...wsResult, diagnostics };
+  } catch (wsError) {
+    diagnostics.push(`WebSocket final fallback failed: ${wsError instanceof Error ? wsError.message : 'Unknown error'}`);
   }
 
   return fallbackHttpProbe(serverUrl, token, diagnostics);

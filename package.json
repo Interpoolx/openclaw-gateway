@@ -1,0 +1,32 @@
+{
+  "name": "openclaw-admin-suite",
+  "version": "2.0.0",
+  "description": "Enterprise-grade Admin Panel for OpenClaw AI Agent Framework - React + Cloudflare Workers",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "dev:backend": "npm run dev --workspace=backend",
+    "build": "npm run build:frontend && npm run build:backend && npm run copy-dist",
+    "build:frontend": "npm run build --workspace=frontend",
+    "build:backend": "npm run build --workspace=backend",
+    "copy-dist": "node -e \"const fs=require('fs'),path=require('path'); const src='frontend/dist',dst='dist'; if(!fs.existsSync(dst))fs.mkdirSync(dst,{recursive:true}); fs.cpSync(src,dst,{recursive:true,force:true}); console.log('Copied frontend/dist to dist/');\"",
+    "deploy": "npm run deploy --workspace=backend",
+    "db:generate": "npm run db:generate --workspace=backend",
+    "db:push": "npm run db:push --workspace=backend",
+    "db:studio": "npm run db:studio --workspace=backend"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
+  }
+}

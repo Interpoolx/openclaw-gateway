@@ -6,6 +6,32 @@ type CliRunResult = {
   error?: string;
 };
 
+function readEnvFlag(name: string): string {
+  const value = (globalThis as any)?.process?.env?.[name];
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function isTruthyFlag(value: string): boolean {
+  return /^(1|true|yes|on)$/i.test(value);
+}
+
+function isNodeLikeRuntime(): boolean {
+  const proc = (globalThis as any)?.process;
+  return Boolean(proc?.versions?.node);
+}
+
+export function isCliFallbackEnabledByEnv(): boolean {
+  return isTruthyFlag(readEnvFlag('OPENCLAW_ENABLE_CLI_FALLBACK'));
+}
+
+export function isCliRuntimeAvailable(): boolean {
+  return isNodeLikeRuntime();
+}
+
+export function canUseCliFallback(): boolean {
+  return isCliFallbackEnabledByEnv() && isCliRuntimeAvailable();
+}
+
 type CliJsonRunResult = {
   ok: boolean;
   payload: any;
@@ -69,6 +95,16 @@ function defaultCliWorkspaceDir(): string {
 }
 
 async function runCli(prefix: string[], args: string[]): Promise<CliRunResult> {
+  if (!canUseCliFallback()) {
+    return {
+      ok: false,
+      stdout: '',
+      stderr: '',
+      command: `${prefix.join(' ')} ${args.join(' ')}`.trim(),
+      error: 'CLI fallback is disabled in this runtime (set OPENCLAW_ENABLE_CLI_FALLBACK=true on a Node backend)',
+    };
+  }
+
   try {
     const { spawnSync } = await import('child_process');
     const bin = prefix[0]!;

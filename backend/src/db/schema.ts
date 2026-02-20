@@ -362,6 +362,61 @@ export const tokenUsage = sqliteTable('token_usage', {
   createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`),
 });
 
+// Config builder templates table
+export const configTemplates = sqliteTable('config_templates', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id').references(() => workspaces.id, { onDelete: 'cascade' }),
+  createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  slug: text('slug').notNull(),
+  name: text('name').notNull(),
+  description: text('description'),
+  goal: text('goal').notNull(),
+  category: text('category').notNull(),
+  templateType: text('template_type').default('assistant'),
+  channels: text('channels').default('[]'),
+  providers: text('providers').default('[]'),
+  tags: text('tags').default('[]'),
+  baseConfigJson: text('base_config_json').notNull(),
+  defaultOptionsJson: text('default_options_json').default('{}'),
+  schemaJson: text('schema_json').default('{}'),
+  isOfficial: integer('is_official', { mode: 'boolean' }).default(false),
+  isFeatured: integer('is_featured', { mode: 'boolean' }).default(true),
+  isActive: integer('is_active', { mode: 'boolean' }).default(true),
+  createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text('updated_at').default(sql`CURRENT_TIMESTAMP`),
+});
+
+// Config builder saved setups table
+export const configSetups = sqliteTable('config_setups', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id').references(() => workspaces.id, { onDelete: 'cascade' }),
+  userId: text('user_id').references(() => users.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  slug: text('slug'),
+  sourceMode: text('source_mode').notNull(),
+  templateId: text('template_id').references(() => configTemplates.id, { onDelete: 'set null' }),
+  optionsJson: text('options_json').default('{}'),
+  configJson: text('config_json').notNull(),
+  summary: text('summary'),
+  isPublic: integer('is_public', { mode: 'boolean' }).default(false),
+  downloads: integer('downloads').default(0),
+  lastDownloadedAt: text('last_downloaded_at'),
+  deletedAt: text('deleted_at'),
+  createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text('updated_at').default(sql`CURRENT_TIMESTAMP`),
+});
+
+// Config setup versions table
+export const configSetupVersions = sqliteTable('config_setup_versions', {
+  id: text('id').primaryKey(),
+  setupId: text('setup_id').references(() => configSetups.id, { onDelete: 'cascade' }),
+  version: integer('version').notNull(),
+  configJson: text('config_json').notNull(),
+  optionsJson: text('options_json').default('{}'),
+  createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`),
+});
+
 // Types
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
@@ -401,3 +456,9 @@ export type GitCommit = typeof gitCommits.$inferSelect;
 export type NewGitCommit = typeof gitCommits.$inferInsert;
 export type TokenUsage = typeof tokenUsage.$inferSelect;
 export type NewTokenUsage = typeof tokenUsage.$inferInsert;
+export type ConfigTemplate = typeof configTemplates.$inferSelect;
+export type NewConfigTemplate = typeof configTemplates.$inferInsert;
+export type ConfigSetup = typeof configSetups.$inferSelect;
+export type NewConfigSetup = typeof configSetups.$inferInsert;
+export type ConfigSetupVersion = typeof configSetupVersions.$inferSelect;
+export type NewConfigSetupVersion = typeof configSetupVersions.$inferInsert;

@@ -1,0 +1,15 @@
+PRAGMA foreign_keys = OFF;
+DROP TABLE IF EXISTS task_assignees;
+DROP TABLE IF EXISTS comments;
+DROP TABLE IF EXISTS activities;
+DROP TABLE IF EXISTS session_logs;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS tasks;
+DROP TABLE IF EXISTS agents;
+DROP TABLE IF EXISTS user_channels;
+DROP TABLE IF EXISTS openclaw_connections;
+DROP TABLE IF EXISTS settings;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS drizzle_migrations;
+DROP TABLE IF EXISTS _drizzle_migrations;
+PRAGMA foreign_keys = ON;

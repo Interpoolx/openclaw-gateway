@@ -17,6 +17,7 @@ import {
     Users,
     AlertCircle,
 } from 'lucide-react';
+
 import { toast } from 'sonner';
 import {
     restartGateway,
@@ -414,37 +415,105 @@ export function OpenClawSettingsPanel({
                 wsUrl = 'ws://' + wsUrl.slice(7);
             }
 
-            const fullWsUrl = `${wsUrl}${wsUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(connectionConfig.gatewayToken)}`;
             addDiagnostic('WebSocket Connection', 'pending', `Connecting to ${wsUrl}...`);
 
             let wsSuccess = false;
             try {
                 await new Promise<void>((resolve, reject) => {
-                    const ws = new WebSocket(fullWsUrl);
+                    const ws = new WebSocket(wsUrl);
+                    let settled = false;
+                    let connectRequestId = '';
 
                     const timeout = setTimeout(() => {
+                        settled = true;
                         ws.close();
                         reject(new Error('Connection timeout (10s)'));
                     }, 10000);
 
                     ws.onopen = () => {
-                        clearTimeout(timeout);
-                        addDiagnostic('WebSocket Connection', 'success', 'WebSocket connected successfully!');
-                        ws.close();
-                        wsSuccess = true;
-                        resolve();
+                        const role = connectionConfig.role === 'node' ? 'node' : 'operator';
+                        const clientId = role === 'node' ? 'headless-node' : 'cli';
+                        connectRequestId = `settings-connect-${Date.now()}`;
+                        ws.send(JSON.stringify({
+                            type: 'req',
+                            id: connectRequestId,
+                            method: 'connect',
+                            params: {
+                                minProtocol: 3,
+                                maxProtocol: 3,
+                                client: {
+                                    id: clientId,
+                                    displayName: 'OpenClaw Settings',
+                                    version: '1.0.0',
+                                    platform: 'linux',
+                                    mode: role,
+                                },
+                                role,
+                                scopes: role === 'node' ? [] : ['operator.read', 'operator.write'],
+                                caps: [],
+                                commands: [],
+                                permissions: {},
+                                auth: {
+                                    token: connectionConfig.gatewayToken,
+                                    ...(connectionConfig.password?.trim() ? { password: connectionConfig.password.trim() } : {}),
+                                },
+                                locale: navigator.language || 'en-US',
+                                userAgent: navigator.userAgent,
+                            },
+                        }));
+                    };
+
+                    ws.onmessage = (event) => {
+                        let data: any;
+                        try {
+                            data = JSON.parse(event.data);
+                        } catch {
+                            return;
+                        }
+
+                        const successFromRes = data.type === 'res' && data.id === connectRequestId && data.ok;
+                        const successFromReadyEvent = data.type === 'event' && data.event === 'connect.ready';
+                        if (successFromRes || successFromReadyEvent) {
+                            if (settled) return;
+                            settled = true;
+                            clearTimeout(timeout);
+                            addDiagnostic('WebSocket Connection', 'success', 'WebSocket connected and authenticated.');
+                            wsSuccess = true;
+                            ws.close(1000, 'Test complete');
+                            resolve();
+                            return;
+                        }
+
+                        const failedFromRes = data.type === 'res' && data.id === connectRequestId && !data.ok;
+                        const failedFromError = data.type === 'error' || data.error;
+                        if (failedFromRes || failedFromError) {
+                            if (settled) return;
+                            settled = true;
+                            clearTimeout(timeout);
+                            const errorMessage =
+                                data.error?.message ||
+                                data.error ||
+                                data.message ||
+                                'WebSocket authentication failed';
+                            ws.close();
+                            reject(new Error(String(errorMessage)));
+                        }
                     };
 
                     ws.onerror = (error) => {
+                        if (settled) return;
+                        settled = true;
                         clearTimeout(timeout);
                         console.error('WebSocket error:', error);
                         reject(new Error('WebSocket connection failed'));
                     };
 
                     ws.onclose = (event) => {
-                        if (event.code !== 1000) { // 1000 = normal closure
+                        if (!settled && event.code !== 1000) {
+                            settled = true;
                             clearTimeout(timeout);
-                            reject(new Error(`WebSocket closed unexpectedly (code: ${event.code})`));
+                            const reason = event.reason?.trim() ? `: ${event.reason}` : '';
+                            reject(new Error(`WebSocket closed unexpectedly (code: ${event.code}${reason})`));
                         }
                     };
                 });
@@ -533,12 +602,24 @@ export function OpenClawSettingsPanel({
                 }
             } catch (apiError) {
                 const errorMsg = apiError instanceof Error ? apiError.message : 'Unknown error';
-                addDiagnostic('HTTP Connection (via backend)', 'error', `Backend proxy error: ${errorMsg}`);
+                const isNetworkError =
+                    typeof apiError === 'object' &&
+                    apiError !== null &&
+                    (
+                        (apiError as any).message === 'Network Error' ||
+                        (apiError as any).code === 'ERR_NETWORK'
+                    );
+
+                const backendHint = isNetworkError
+                    ? 'Backend proxy error: Network Error. Frontend cannot reach backend /api. Set VITE_API_URL to your backend Worker URL (https://<worker>.workers.dev/api) or configure your host to proxy /api to backend.'
+                    : `Backend proxy error: ${errorMsg}`;
+
+                addDiagnostic('HTTP Connection (via backend)', 'error', backendHint);
 
                 if (wsSuccess) {
                     // WebSocket succeeded so gateway is reachable, but backend proxy failed
                     addDiagnostic('Partial Connectivity', 'success',
-                        'WebSocket connected directly. Backend proxy may not be running or configured correctly.');
+                        'WebSocket connected directly. Backend proxy is unreachable or not mapped to /api.');
                     setConnectionStatus('connected');
                     localStorage.setItem('openclaw_connection_status', 'connected');
                     localStorage.setItem('openclaw_connection_tested_at', new Date().toISOString());
@@ -822,11 +903,16 @@ export function OpenClawSettingsPanel({
                 },
             }));
         } catch (error) {
+            const maybeResponse = (error as any)?.response?.data as { errorDetails?: string; diagnostics?: string[]; success?: boolean } | undefined;
             setOperationResults((prev) => ({
                 ...prev,
                 [op]: {
                     success: false,
-                    summary: error instanceof Error ? error.message : 'Unknown error',
+                    summary: maybeResponse?.errorDetails
+                        ? `Failed to fetch ${label}: ${maybeResponse.errorDetails}`
+                        : (error instanceof Error ? error.message : 'Unknown error'),
+                    diagnostics: maybeResponse?.diagnostics,
+                    payload: maybeResponse,
                 },
             }));
         } finally {
@@ -844,6 +930,7 @@ export function OpenClawSettingsPanel({
 
     const getGatewayBlockers = (result: { success: boolean; summary: string; diagnostics?: string[]; payload?: unknown } | null) => {
         if (!result) return { originBlocked: false, policyBlocked: false };
+        if (result.success) return { originBlocked: false, policyBlocked: false };
         const lines = [
             ...(result.diagnostics ?? []),
             result.summary ?? '',
@@ -1060,10 +1147,10 @@ export function OpenClawSettingsPanel({
                         <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-md">
                             <h5 className="text-xs font-semibold text-amber-500 mb-2">Quick Fixes</h5>
                             <ul className="text-xs text-zinc-400 space-y-1">
-                                <li>- <strong>Gateway not running?</strong> Start OpenClaw locally with port 18789</li>
-                                <li>- <strong>Wrong URL?</strong> Use your Cloudflare Tunnel URL for remote access</li>
-                                <li>- <strong>Token invalid?</strong> Check Gateway Token in OpenClaw dashboard</li>
-                                <li>- <strong>CORS error?</strong> Ensure gateway allows requests from this origin</li>
+                                <li>- <strong>Invalid connect params?</strong> Use protocol-safe client values: <code>client.id=&quot;cli&quot;</code>, <code>client.mode=&quot;operator&quot;</code>, <code>client.platform=&quot;linux&quot;</code>.</li>
+                                <li>- <strong>Backend Network Error?</strong> Frontend cannot reach backend API. Set <code>VITE_API_URL=https://&lt;your-backend&gt;/api</code> or ensure your domain forwards <code>/api/*</code> to the backend Worker.</li>
+                                <li>- <strong>Gateway not running?</strong> Start OpenClaw locally and verify port <code>18789</code> is listening.</li>
+                                <li>- <strong>Wrong URL / Token?</strong> Use the exact gateway URL and matching <code>gateway.auth.token</code> from OpenClaw config.</li>
                             </ul>
                         </div>
                     )}

@@ -83,6 +83,132 @@ async function sendConnectRequest(
   diagnostics.push('[WS] sent connect request');
 }
 
+type WsInvokeResult = {
+  method: string;
+  payload: any;
+};
+
+export async function invokeOpenClawViaWebSocketAny(
+  config: OpenClawWsConfig & { methods: string[]; params?: Record<string, unknown> }
+): Promise<WsInvokeResult> {
+  const { serverUrl, token, methods, params = {}, timeout = 12000 } = config;
+  const wsUrl = convertHttpToWs(serverUrl);
+  const cleanedToken = cleanToken(token);
+
+  return new Promise((resolve, reject) => {
+    const pending = new Map<string, PendingRequest>();
+    let ws: WebSocket;
+    let authenticated = false;
+    let authRequestId: string | null = null;
+    let callIndex = 0;
+
+    const teardown = () => {
+      pending.clear();
+      if (ws && ws.readyState === WebSocket.OPEN) ws.close(1000, 'done');
+    };
+
+    const timeoutId = setTimeout(() => {
+      teardown();
+      reject(new Error(`WebSocket invoke timeout after ${timeout}ms`));
+    }, timeout);
+
+    const request = (method: string): Promise<any> => new Promise((reqResolve, reqReject) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        reqReject(new Error('WebSocket not connected'));
+        return;
+      }
+      const id = generateId();
+      pending.set(id, { resolve: reqResolve, reject: reqReject });
+      ws.send(JSON.stringify({ type: 'req', id, method, params }));
+      setTimeout(() => {
+        if (pending.has(id)) {
+          pending.delete(id);
+          reqReject(new Error(`Request timeout for ${method}`));
+        }
+      }, 7000);
+    });
+
+    const runNextMethod = async () => {
+      if (callIndex >= methods.length) {
+        clearTimeout(timeoutId);
+        teardown();
+        reject(new Error('No WebSocket method candidate succeeded'));
+        return;
+      }
+      const method = methods[callIndex++]!;
+      try {
+        const payload = await request(method);
+        clearTimeout(timeoutId);
+        teardown();
+        resolve({ method, payload });
+      } catch {
+        await runNextMethod();
+      }
+    };
+
+    try {
+      ws = new WebSocket(`${wsUrl}?token=${encodeURIComponent(cleanedToken)}`);
+
+      ws.addEventListener('message', (event: MessageEvent) => {
+        let data: OpenClawWsResponse;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        if (data.type === 'event' && data.event === 'connect.challenge') {
+          authRequestId = generateId();
+          void sendConnectRequest(ws, authRequestId, cleanedToken, []);
+          return;
+        }
+
+        if (data.type === 'event' && data.event === 'connect.ready' && !authenticated) {
+          authenticated = true;
+          void runNextMethod();
+          return;
+        }
+
+        if (data.type === 'res') {
+          if (data.id && pending.has(data.id)) {
+            const req = pending.get(data.id)!;
+            pending.delete(data.id);
+            if (data.ok) req.resolve(data.payload);
+            else req.reject(new Error(data.error?.message || 'request failed'));
+            return;
+          }
+
+          if (!authenticated && authRequestId && data.id === authRequestId) {
+            if (data.ok) {
+              authenticated = true;
+              void runNextMethod();
+            } else {
+              clearTimeout(timeoutId);
+              teardown();
+              reject(new Error(data.error?.message || 'Authentication failed'));
+            }
+            return;
+          }
+
+          if (!authenticated && data.ok) {
+            authenticated = true;
+            void runNextMethod();
+          }
+        }
+      });
+
+      ws.addEventListener('error', () => {
+        clearTimeout(timeoutId);
+        teardown();
+        reject(new Error(`WebSocket connection failed to ${wsUrl}`));
+      });
+    } catch (error) {
+      clearTimeout(timeoutId);
+      reject(new Error(`Failed to create WebSocket: ${error instanceof Error ? error.message : 'Unknown error'}`));
+    }
+  });
+}
+
 export async function queryOpenClawViaWebSocket(config: OpenClawWsConfig): Promise<OpenClawGatewayInfo> {
   const { serverUrl, token, timeout = 15000 } = config;
   const wsUrl = convertHttpToWs(serverUrl);

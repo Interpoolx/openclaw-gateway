@@ -1,4 +1,5 @@
 import { convertWsToHttp } from './url';
+import { invokeOpenClawViaWebSocketAny } from './ws-client';
 
 const DEFAULT_SESSION_KEY = 'agent:main:main';
 const GATEWAY_REQUEST_TIMEOUT_MS = 12000;
@@ -45,6 +46,24 @@ async function invokeGatewayTool(
   args: Record<string, unknown> = {},
   dryRun = false
 ): Promise<{ ok: boolean; status: number; body: any; error?: string }> {
+  const wsCandidates = Array.from(new Set([
+    tool,
+    tool.includes('_') ? tool.replace(/_/g, '.') : tool,
+  ]));
+
+  try {
+    const wsResult = await invokeOpenClawViaWebSocketAny({
+      serverUrl,
+      token,
+      methods: wsCandidates,
+      params: args,
+      timeout: 9000,
+    });
+    return { ok: true, status: 200, body: wsResult.payload };
+  } catch {
+    // Fall back to HTTP /tools/invoke for runtimes that only expose that path.
+  }
+
   const baseUrl = convertWsToHttp(serverUrl);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), GATEWAY_REQUEST_TIMEOUT_MS);

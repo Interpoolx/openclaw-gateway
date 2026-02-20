@@ -37,6 +37,14 @@ binding = "DB"
 database_name = "openclaw_admin"
 database_id = "c2d6771b-f812-46f6-8d29-1bf21f64cde0"  # <-- REPLACE THIS WITH YOUR DATABASE ID
 
+[[kv_namespaces]]
+binding = "CONFIG_BUILDER_RATELIMIT_KV"
+id = "60cb873a9bf24060a38c34090b48d212"
+preview_id = "27d9a21f1e3c4a7a96e5ef2cdf2029bd"
+
+[triggers]
+crons = ["0 3 * * *"]
+
 # Vars for external OpenClaw integration
 [vars]
 OPENCLAW_MODE = "external"
